@@ -5,7 +5,7 @@ import threading
 import subprocess
 import re
 from pathlib import Path
-from tkinter import filedialog, messagebox, StringVar, BooleanVar, Listbox, Scrollbar
+from tkinter import filedialog, messagebox, StringVar, BooleanVar, Listbox, Scrollbar, PhotoImage
 import tkinter as tk
 from ttkbootstrap import Style, Window, Frame, Label, Button, Entry, Combobox, Progressbar, Text, Menu, Toplevel
 import requests
@@ -75,6 +75,11 @@ class NeteaseMusicDownloader:
         self.window.geometry("850x800")
         self.window.resizable(False, False)
         self.window.grab_set()  # 模态窗口
+
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png")
+        if os.path.exists(icon_path):
+            icon_image = PhotoImage(file=icon_path)
+            self.window.iconphoto(False, icon_image)
         
         # 设置主题
         self.style = Style()
@@ -847,6 +852,11 @@ class AdbFileUploader:
         self.root.title("Lemon Link Assistant 6.0 - ADB文件上传器")
         self.root.geometry("700x800")
         self.root.resizable(False, False)
+        # 设置图标
+        icon_png_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png")
+        if os.path.exists(icon_png_path):
+            self.icon_image = PhotoImage(file=icon_png_path)
+            self.root.iconphoto(False, self.icon_image)
         
         # 设置现代化主题
         self.style = Style(theme="litera")
@@ -873,14 +883,7 @@ class AdbFileUploader:
         self.create_menu()
         self.create_widgets()
         self.check_connected_devices()
-        
-        # 设置窗口图标
-        try:
-            self.root.iconbitmap("icon.ico")
-            self.root.iconphoto(True, tk.PhotoImage(file="icon.png"))
-        except:
-            pass
-    
+
     def find_adb_path(self):
         """查找ADB路径"""
         current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -984,7 +987,7 @@ class AdbFileUploader:
    另一种方法：开机右上角点击头像-退出登录，会有一个密码框，点击眼睛图标显示密码，随便输入五位数然后长按文本，选择拨打电话。
 2. 输入 *#*#83781#*#*，在上方菜单中的第一项 TELEPHONY 中下滑找到 USB 接口激活，打开在第二项 DEBUG&LOG 中找到 USB Debug，打开它。
 3. 使用数据线连接电脑，打开本程序，平板应该会提示：是否使用本台计算机调试，勾选一律使用，点确定即可。
-4. 重启软件，Having fun """
+4. 重启软件，开始搞机吧 ~"""
         
         self.tips_text = Label(main_frame, width=70, text=default_tips, wraplength=450, justify=tk.LEFT)
         self.tips_text.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(0, 10))
@@ -996,6 +999,7 @@ class AdbFileUploader:
             filetypes=[
                 ("所有文件", "*.*"),
                 ("文档文件", "*.doc *.docx *.pdf *.txt"),
+                ("演示文件", "*.ppt *.pptx"),
                 ("图片文件", "*.jpg *.png *.gif"),
                 ("视频文件", "*.mp4 *.avi *.mov"),
                 ("音频文件", "*.mp3 *.wav *.flac")
@@ -1047,7 +1051,7 @@ class AdbFileUploader:
             return
         
         try:
-            result = subprocess.run([self.adb_path, "devices"], capture_output=True, text=True, timeout=5)
+            result = subprocess.run([self.adb_path, "devices"], capture_output=True, text=True, timeout=10)
             output = result.stdout
             
             self.device_listbox.delete(0, tk.END)
@@ -1071,6 +1075,7 @@ class AdbFileUploader:
             
         except Exception as e:
             self.status_label.config(text=f"检查设备时出错: {str(e)}")
+            raise e
     
     def start_upload(self):
         """开始上传"""
