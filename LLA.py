@@ -4,12 +4,23 @@ import json
 import threading
 import subprocess
 import re
+import hashlib
+import base64
+import time
+import random
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import unpad
 from pathlib import Path
 from tkinter import filedialog, messagebox, StringVar, BooleanVar, Listbox, Scrollbar, PhotoImage
 import tkinter as tk
 from ttkbootstrap import Style, Window, Frame, Label, Button, Entry, Combobox, Progressbar, Text, Menu, Toplevel
 import requests
-
+def resource_path(relative_path):
+    try:
+        base_path = sys._MEIPASS  # PyInstaller临时文件夹
+    except Exception:
+        base_path = os.path.dirname(os.path.abspath(__file__))  # 正常运行时的路径
+    return os.path.join(base_path, relative_path)
 class SongInfo:
     def __init__(self, song_id=None, name=None, artists=None, album=None, url=None, pic_url=None, 
                  quality=None, size=None, file_path=None, duration=0):
@@ -32,7 +43,327 @@ class SongInfo:
         if self.quality:
             name += f" [{self.quality}]"
         return name
+class BilibiliVideoDownloader:
+    SECRET_KEY = "5Q0NvQxD0zdQ5RLQy5xs"  # 签名使用的密钥
+    DECRYPT_KEY = "12345678901234567890123456789012"  # 解密使用的32字节密钥
+    XOR_KEY = 0x5a  # XOR操作使用的密钥
+    STANDARD_B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    CUSTOM_B64 = "P3xL7mKb8nZ5vF2dRqYtJ1GcV4iW0g6Ae9pUfEhHjSaCpTNOXQDyMkIlBsuozrw+"
+    def __init__(self, parent_window):
+        self.parent = parent_window
+        self.window = None
+        self.temp_download_dir = os.path.join(os.path.expanduser("~"), "BilibiliTemp")
+        os.makedirs(self.temp_download_dir, exist_ok=True)
+        self.on_files_downloaded = None
+        self.is_downloading = False
+        self.download_thread = None
+        
+    def show(self):
+        """显示下载器窗口"""
+        if self.window is not None and self.window.winfo_exists():
+            self.window.focus()
+            return
+        
+        self.window = Toplevel(self.parent)
+        self.window.title("Bilibili视频下载器")
+        self.window.geometry("600x400")
+        self.window.resizable(False, False)
+        self.window.transient(self.parent)
 
+        icon_path = resource_path("icon.png")
+        if os.path.exists(icon_path):
+            icon_image = PhotoImage(file=icon_path)
+            self.window.iconphoto(False, icon_image)
+        
+        # 设置主题
+        self.style = Style()
+        
+        self.create_widgets()
+        
+        # 设置窗口关闭事件
+        self.window.protocol("WM_DELETE_WINDOW", self.on_close)
+    def create_widgets(self):
+        """创建控件"""
+        main_frame = Frame(self.window, padding=20)
+        main_frame.pack(fill="both", expand=True)
+        
+        # 输入行
+        input_row = Frame(main_frame)
+        input_row.pack(fill="x", pady=(0, 10))
+        
+        Label(input_row, text="Bilibili视频链接:", width=15, anchor="e").pack(side="left", padx=(0, 5))
+        self.url_entry = Entry(input_row, width=40)
+        self.url_entry.pack(side="left", padx=2)
+        
+        Button(input_row, text="解析并下载", command=self.start_download, style="primary.TButton", width=12).pack(side="left", padx=5)
+        
+        # 信息显示区域
+        self.info_text = Text(main_frame, height=15, width=70, relief="solid", borderwidth=1, state="disabled")
+        self.info_text.pack(fill="both", expand=True)
+        # 状态和进度
+        status_frame = Frame(main_frame)
+        status_frame.pack(fill="x", pady=10)
+        self.status_label = Label(status_frame, text="就绪", foreground="#666")
+        self.status_label.pack(side="left")
+        self.progress_var = tk.DoubleVar(value=0)
+        self.progressbar = Progressbar(status_frame, variable=self.progress_var, maximum=100,
+                                        style="success.Horizontal.Tprogressbar")
+        self.progressbar.pack(side="right", fill="x", expand=True, padx=10)
+    def start_download(self):
+        """开始下载视频"""
+        if self.is_downloading:
+            messagebox.showwarning("警告", "已有下载任务进行中")
+            return
+        video_url = self.url_entry.get().strip()
+        if not video_url:
+            messagebox.showwarning("输入错误", "请输入Bilibili视频链接")
+            return
+        if not ("bilibili.com" in video_url or "b23.tv" in video_url):
+            if messagebox.askyesno("URL验证", "输入的链接似乎不是Bilibili链接，是否继续？"):
+                pass
+            else:
+                return
+                
+        self.is_downloading = True
+        self.download_thread = threading.Thread(target=self._download_thread, args=(video_url,), daemon=True)
+        self.download_thread.start()
+    
+    def _download_thread(self, video_url):
+        """下载视频线程"""
+        self.root_after(lambda: self.progressbar.pack(fill="x", pady=5))
+        self.root_after(lambda: self.progress_var.set(0))
+        
+        try:
+            # 步骤1: 解析URL
+            self.root_after(lambda: self.status_label.config(text="正在解析视频链接..."))
+            self.root_after(lambda: self.progress_var.set(10))
+            
+            result = self.parse_video_url(video_url)
+            if not result or result.get("status") != 0 or "data" not in result:
+                error_msg = result.get("msg", "解析失败") if result else "无效的API响应"
+                raise ValueError(f"视频解析失败: {error_msg}")
+            
+            data = result["data"]
+            video_url = data.get("url")
+            title = data.get("title", "未命名视频")
+            
+            if not video_url:
+                raise ValueError("未找到有效的视频下载链接")
+            
+            # 显示视频信息
+            info_text = f"标题: {title}\n状态: 准备下载..."
+            self.root_after(lambda: self.update_info_text(info_text))
+            
+            # 步骤2: 下载视频
+            self.root_after(lambda: self.status_label.config(text="正在下载视频..."))
+            self.root_after(lambda: self.progress_var.set(30))
+            
+            saved_file = self.save_video(video_url, title)
+            if not saved_file:
+                raise ValueError("视频下载失败或被取消")
+            
+            # 步骤3: 完成
+            file_size = os.path.getsize(saved_file) / (1024 * 1024)
+            info_text = f"标题: {title}\n大小: {file_size:.2f} MB\n状态: 下载完成\n保存位置: {saved_file}"
+            self.root_after(lambda: self.update_info_text(info_text))
+            
+            self.root_after(lambda: self.status_label.config(text=f"下载完成: {os.path.basename(saved_file)}"))
+            self.root_after(lambda: self.progress_var.set(100))
+            
+            # 触发回调
+            if self.on_files_downloaded:
+                self.root_after(lambda: self.on_files_downloaded([saved_file]))
+                
+        except Exception as e:
+            if self.is_downloading:  # 只有在未取消的情况下才显示错误
+                self.root_after(lambda: self.status_label.config(text=f"下载失败: {str(e)}"))
+                self.root_after(lambda e=e: messagebox.showerror("错误", f"下载失败: {str(e)}"))
+        finally:
+            self.root_after(lambda: self.progressbar.pack_forget())
+            self.root_after(lambda: self.progress_var.set(0))
+            self.is_downloading = False
+
+    def generate_signature(self, params, salt, ts, secret_key):
+        """
+        生成MD5签名，与JS中的generateSignatureWithMD5函数功能一致
+        """
+        replace_bd= lambda s:s.replace('b', '#').replace('d', 'b').replace('#', 'd')
+        # 1. 获取参数对象的所有键并按字母顺序排序
+        sorted_keys = sorted(params.keys())
+        
+        # 2. 将键值对转换为URL查询字符串格式
+        query_items = [f"{key}={params[key]}" for key in sorted_keys]
+        query_string = "&".join(query_items)
+        
+        # 3. 拼接签名字符串
+        sign_str = f"{query_string}&salt={salt}&ts={ts}&secret={secret_key}"
+        
+        # 4. 计算MD5哈希
+        md5_hash = hashlib.md5(sign_str.encode('utf-8')).hexdigest()
+        
+        # 5. 应用字符替换混淆（b和d互换）
+        return replace_bd(md5_hash)
+
+    def generate_signed_params(self, request_url, captcha_key="", captcha_input="", user_id=None):
+        """
+        生成带签名的请求参数
+        """
+        # 准备基础参数
+        params = {
+            "requestURL": request_url,
+            "captchaKey": captcha_key,
+            "captchaInput": captcha_input
+        }
+        
+        if user_id:
+            params["userID"] = user_id
+        
+        # 生成时间戳(秒级)
+        ts = int(time.time())
+        
+        # 生成随机salt (8位16进制)
+        salt = ''.join(random.choice('0123456789abcdef') for _ in range(8))
+        
+        # 生成签名
+        sign = self.generate_signature(params, salt, ts, self.SECRET_KEY)
+        
+        # 添加签名参数
+        params["ts"] = ts
+        params["salt"] = salt
+        params["sign"] = sign
+        
+        return params
+
+    def decrypt_response(self, encrypted_data: str, iv: str, key: str = DECRYPT_KEY) -> dict:
+        """
+        解密 Kukude 加密的响应数据
+        """
+        
+        def xor_string(s: str, key: int = 0x5a) -> str:
+            return ''.join(chr(ord(c) ^ key) for c in s)
+        
+        def block_reverse(s: str, block_size: int = 8) -> str:
+            return ''.join(
+                s[i:i+block_size][::-1] 
+                for i in range(0, len(s), block_size)
+            )
+        
+        def base64_custom_decode(s: str) -> str:
+            custom_charset = "ZYXABCDEFGHIJKLMNOPQRSTUVWzyxabcdefghijklmnopqrstuvw9876543210-_"
+            std_charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+            mapping = str.maketrans(custom_charset, std_charset)
+            return s.translate(mapping)
+        
+        try:
+            # 预处理密文数据
+            data = xor_string(encrypted_data)
+            data = block_reverse(data)
+            data = base64_custom_decode(data)
+            ciphertext = base64.b64decode(data)  # 标准 Base64 解码
+
+            iv_data = xor_string(iv)
+            iv_data = block_reverse(iv_data)
+            iv_data = base64_custom_decode(iv_data)
+            iv_bytes = base64.b64decode(iv_data)  # 标准 Base64 解码
+            if len(iv_bytes) != 16:
+                raise ValueError(f"Invalid IV length: {len(iv_bytes)} bytes (expected 16)")
+
+            key_bytes = key.encode('utf-8')
+            cipher = AES.new(key_bytes, AES.MODE_CBC, iv=iv_bytes)
+            decrypted = cipher.decrypt(ciphertext)
+
+            unpadded = unpad(decrypted, AES.block_size)
+
+            return json.loads(unpadded.decode('utf-8'))
+        
+        except (ValueError, json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise ValueError(f"Decryption failed: {str(e)}") from e
+
+    def parse_video_url(self, video_url):
+        """
+        解析视频URL，获取无水印视频
+        """
+        # 1. 生成签名参数
+        signed_params = self.generate_signed_params(video_url)
+        
+        # 2. 发送请求
+        url = "https://dy.kukutool.com/api/parse"
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+            "Origin": "https://dy.kukutool.com",
+            "Referer": "https://dy.kukutool.com/"
+        }
+        
+        try:
+            response = requests.post(url, data=json.dumps(signed_params), headers=headers, verify=False)
+            response.raise_for_status()
+            
+            # 3. 解析响应
+            result = response.json()
+            
+            # 4. 检查是否需要解密
+            if "encrypt" in result and result["encrypt"] and "data" in result and "iv" in result:
+                decrypted_data = self.decrypt_response(result["data"], result["iv"])
+                result["data"] = decrypted_data
+            return result
+        except Exception as e:
+            return None
+
+    def save_video(self, video_url, title):
+        """保存视频到本地"""
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+            }
+            response = requests.get(video_url, headers=headers, stream=True, timeout=60)
+            response.raise_for_status()
+            
+            # 清理文件名
+            safe_title = re.sub(r'[\\/*?:"<>|]', '', title)
+            safe_title = safe_title[:100]  # 限制文件名长度
+            filename = f"{safe_title}.mp4"
+            file_path = os.path.join(self.temp_download_dir, filename)
+            
+            # 获取内容长度
+            content_length = response.headers.get('Content-Length')
+            total_size = int(content_length) if content_length else None
+            downloaded_size = 0
+            with open(file_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded_size += len(chunk)
+                        if total_size:
+                            progress = 50 + (downloaded_size / total_size * 50)
+                            self.root_after(lambda p=progress: self.progress_var.set(p))
+            
+            return file_path
+        except Exception as e:
+            raise Exception(f"视频保存失败: {str(e)}")
+
+    def update_info_text(self, text):
+        """更新信息文本"""
+        self.info_text.config(state="normal")
+        self.info_text.delete(1.0, tk.END)
+        self.info_text.insert(tk.END, text)
+        self.info_text.config(state="disabled")
+    
+    def root_after(self, callback):
+        """在主线程中执行回调"""
+        if self.window and self.window.winfo_exists():
+            self.window.after(0, callback)
+    
+    def on_close(self):
+        """窗口关闭事件"""
+        if self.is_downloading:
+            if messagebox.askyesno("确认", "有下载任务正在进行，确定要关闭吗？"):
+                self.is_downloading = False
+                self.window.destroy()
+                self.window = None
+        else:
+            self.window.destroy()
+            self.window = None
 class NeteaseMusicDownloader:
     def __init__(self, parent_window):
         self.parent = parent_window
@@ -40,8 +371,6 @@ class NeteaseMusicDownloader:
         self.current_songs = []
         self.search_results = []
         self.temp_download_dir = os.path.join(os.path.expanduser("~"), "NeteaseMusicTemp")
-        
-        # 确保临时目录存在
         os.makedirs(self.temp_download_dir, exist_ok=True)
         
         # API配置
@@ -72,11 +401,11 @@ class NeteaseMusicDownloader:
         
         self.window = Toplevel(self.parent)
         self.window.title("网易云音乐下载器")
-        self.window.geometry("850x800")
+        self.window.geometry("700x800")
         self.window.resizable(False, False)
-        self.window.grab_set()  # 模态窗口
+        self.window.transient(self.parent)
 
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png")
+        icon_path = resource_path("icon.png")
         if os.path.exists(icon_path):
             icon_image = PhotoImage(file=icon_path)
             self.window.iconphoto(False, icon_image)
@@ -853,9 +1182,9 @@ class AdbFileUploader:
         self.root.geometry("700x800")
         self.root.resizable(False, False)
         # 设置图标
-        icon_png_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png")
-        if os.path.exists(icon_png_path):
-            self.icon_image = PhotoImage(file=icon_png_path)
+        icon_path = resource_path("icon.png")
+        if os.path.exists(icon_path):
+            self.icon_image = PhotoImage(file=icon_path)
             self.root.iconphoto(False, self.icon_image)
         
         # 设置现代化主题
@@ -908,6 +1237,7 @@ class AdbFileUploader:
         # 文件菜单
         file_menu = Menu(self.menubar, tearoff=0)
         file_menu.add_command(label="从网易云音乐下载", command=self.open_netease_downloader)
+        file_menu.add_command(label="从Bilibili下载", command=self.open_bilibili_downloader)
         file_menu.add_separator()
         file_menu.add_command(label="退出", command=self.root.quit)
         
@@ -1159,6 +1489,12 @@ class AdbFileUploader:
     def open_netease_downloader(self):
         """打开网易云音乐下载器"""
         downloader = NeteaseMusicDownloader(self.root)
+        downloader.on_files_downloaded = self.handle_downloaded_files
+        downloader.show()
+
+    def open_bilibili_downloader(self):
+        """打开Bilibili下载器"""
+        downloader = BilibiliVideoDownloader(self.root)
         downloader.on_files_downloaded = self.handle_downloaded_files
         downloader.show()
     
