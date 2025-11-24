@@ -4,17 +4,16 @@ import json
 import threading
 import subprocess
 import re
-import hashlib
-import base64
-import time
-import random
+from time import time
+from random import choice
+from base64 import b64decode
+from hashlib import md5
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
-from pathlib import Path
-from tkinter import filedialog, messagebox, StringVar, BooleanVar, Listbox, Scrollbar, PhotoImage
-import tkinter as tk
+from tkinter import filedialog, messagebox, StringVar, DoubleVar, Listbox, Scrollbar, PhotoImage
+from tkinter.constants import *
 from ttkbootstrap import Style, Window, Frame, Label, Button, Entry, Combobox, Progressbar, Text, Menu, Toplevel
-import requests
+from requests import get, post, utils
 def resource_path(relative_path):
     try:
         base_path = sys._MEIPASS  # PyInstaller临时文件夹
@@ -45,7 +44,7 @@ class SongInfo:
         return name
 class BilibiliVideoDownloader:
     SECRET_KEY = "5Q0NvQxD0zdQ5RLQy5xs"  # 签名使用的密钥
-    DECRYPT_KEY = "12345678901234567890123456789012"  # 解密使用的32字节密钥
+    DECRYPT_KEY = "12345678901234567890123456789013"  # 解密使用的32字节密钥
     XOR_KEY = 0x5a  # XOR操作使用的密钥
     STANDARD_B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
     CUSTOM_B64 = "P3xL7mKb8nZ5vF2dRqYtJ1GcV4iW0g6Ae9pUfEhHjSaCpTNOXQDyMkIlBsuozrw+"
@@ -105,7 +104,10 @@ class BilibiliVideoDownloader:
         status_frame.pack(fill="x", pady=10)
         self.status_label = Label(status_frame, text="就绪", foreground="#666")
         self.status_label.pack(side="left")
-        self.progress_var = tk.DoubleVar(value=0)
+        self.cancel_button = Button(status_frame, text="取消下载", command=self.cancel_download,
+                           style="danger.TButton", width=10, state="disabled")
+        self.cancel_button.pack(side="right", padx=10)
+        self.progress_var = DoubleVar(value=0)
         self.progressbar = Progressbar(status_frame, variable=self.progress_var, maximum=100,
                                         style="success.Horizontal.Tprogressbar")
         self.progressbar.pack(side="right", fill="x", expand=True, padx=10)
@@ -125,9 +127,14 @@ class BilibiliVideoDownloader:
                 return
                 
         self.is_downloading = True
+        self.root_after(lambda: self.cancel_button.config(state="normal"))
         self.download_thread = threading.Thread(target=self._download_thread, args=(video_url,), daemon=True)
         self.download_thread.start()
-    
+    def cancel_download(self):
+        """取消当前下载"""
+        if self.is_downloading:
+            self.is_downloading = False
+            self.root_after(lambda: self.status_label.config(text="正在取消下载..."))
     def _download_thread(self, video_url):
         """下载视频线程"""
         self.root_after(lambda: self.progressbar.pack(fill="x", pady=5))
@@ -156,7 +163,7 @@ class BilibiliVideoDownloader:
             
             # 步骤2: 下载视频
             self.root_after(lambda: self.status_label.config(text="正在下载视频..."))
-            self.root_after(lambda: self.progress_var.set(30))
+            self.root_after(lambda: self.progress_var.set(20))
             
             saved_file = self.save_video(video_url, title)
             if not saved_file:
@@ -182,6 +189,7 @@ class BilibiliVideoDownloader:
             self.root_after(lambda: self.progressbar.pack_forget())
             self.root_after(lambda: self.progress_var.set(0))
             self.is_downloading = False
+            self.root_after(lambda: self.cancel_button.config(state="disabled"))
 
     def generate_signature(self, params, salt, ts, secret_key):
         """
@@ -199,7 +207,7 @@ class BilibiliVideoDownloader:
         sign_str = f"{query_string}&salt={salt}&ts={ts}&secret={secret_key}"
         
         # 4. 计算MD5哈希
-        md5_hash = hashlib.md5(sign_str.encode('utf-8')).hexdigest()
+        md5_hash = md5(sign_str.encode('utf-8')).hexdigest()
         
         # 5. 应用字符替换混淆（b和d互换）
         return replace_bd(md5_hash)
@@ -219,10 +227,10 @@ class BilibiliVideoDownloader:
             params["userID"] = user_id
         
         # 生成时间戳(秒级)
-        ts = int(time.time())
+        ts = int(time())
         
         # 生成随机salt (8位16进制)
-        salt = ''.join(random.choice('0123456789abcdef') for _ in range(8))
+        salt = ''.join(choice('0123456789abcdef') for _ in range(8))
         
         # 生成签名
         sign = self.generate_signature(params, salt, ts, self.SECRET_KEY)
@@ -259,12 +267,12 @@ class BilibiliVideoDownloader:
             data = xor_string(encrypted_data)
             data = block_reverse(data)
             data = base64_custom_decode(data)
-            ciphertext = base64.b64decode(data)  # 标准 Base64 解码
+            ciphertext = b64decode(data)  # 标准 Base64 解码
 
             iv_data = xor_string(iv)
             iv_data = block_reverse(iv_data)
             iv_data = base64_custom_decode(iv_data)
-            iv_bytes = base64.b64decode(iv_data)  # 标准 Base64 解码
+            iv_bytes = b64decode(iv_data)  # 标准 Base64 解码
             if len(iv_bytes) != 16:
                 raise ValueError(f"Invalid IV length: {len(iv_bytes)} bytes (expected 16)")
 
@@ -277,7 +285,7 @@ class BilibiliVideoDownloader:
             return json.loads(unpadded.decode('utf-8'))
         
         except (ValueError, json.JSONDecodeError, UnicodeDecodeError) as e:
-            raise ValueError(f"Decryption failed: {str(e)}") from e
+            raise ValueError(f"数据解密失败: {str(e)}") from e
 
     def parse_video_url(self, video_url):
         """
@@ -296,7 +304,7 @@ class BilibiliVideoDownloader:
         }
         
         try:
-            response = requests.post(url, data=json.dumps(signed_params), headers=headers, verify=False)
+            response = post(url, data=json.dumps(signed_params), headers=headers, verify=False)
             response.raise_for_status()
             
             # 3. 解析响应
@@ -308,6 +316,7 @@ class BilibiliVideoDownloader:
                 result["data"] = decrypted_data
             return result
         except Exception as e:
+            self.root_after(lambda e=e:messagebox.showerror("错误", f"解析视频URL失败: {str(e)}"))
             return None
 
     def save_video(self, video_url, title):
@@ -316,7 +325,7 @@ class BilibiliVideoDownloader:
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
             }
-            response = requests.get(video_url, headers=headers, stream=True, timeout=60)
+            response = get(video_url, headers=headers, stream=True, timeout=60)
             response.raise_for_status()
             
             # 清理文件名
@@ -329,15 +338,31 @@ class BilibiliVideoDownloader:
             content_length = response.headers.get('Content-Length')
             total_size = int(content_length) if content_length else None
             downloaded_size = 0
+            start_time = time()
+            last_update_time = start_time
+            last_downloaded = 0
             with open(file_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
+                for chunk in response.iter_content(chunk_size=16384):
+                    if not self.is_downloading:
+                        f.close()
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
+                        self.root_after(self.info_text.config(text="就绪"))
+                        return None
                     if chunk:
                         f.write(chunk)
                         downloaded_size += len(chunk)
                         if total_size:
-                            progress = 50 + (downloaded_size / total_size * 50)
+                            progress = 20 + (downloaded_size / total_size * 80)
                             self.root_after(lambda p=progress: self.progress_var.set(p))
-            
+                    current_time = time()
+                    if current_time - last_update_time > 1:  # 每秒更新一次
+                        downloaded_this_second = downloaded_size - last_downloaded
+                        speed = downloaded_this_second / (current_time - last_update_time) / 1024  # KB/s
+                        speed_text = f"{speed:.1f} KB/s" if speed < 1024 else f"{speed/1024:.1f} MB/s"
+                        self.root_after(lambda s=speed_text: self.status_label.config(text=f"下载速度: {s}"))
+                        last_update_time = current_time
+                        last_downloaded = downloaded_size
             return file_path
         except Exception as e:
             raise Exception(f"视频保存失败: {str(e)}")
@@ -345,8 +370,8 @@ class BilibiliVideoDownloader:
     def update_info_text(self, text):
         """更新信息文本"""
         self.info_text.config(state="normal")
-        self.info_text.delete(1.0, tk.END)
-        self.info_text.insert(tk.END, text)
+        self.info_text.delete(1.0, END)
+        self.info_text.insert(END, text)
         self.info_text.config(state="disabled")
     
     def root_after(self, callback):
@@ -359,6 +384,7 @@ class BilibiliVideoDownloader:
         if self.is_downloading:
             if messagebox.askyesno("确认", "有下载任务正在进行，确定要关闭吗？"):
                 self.is_downloading = False
+                self.root_after(lambda: self.cancel_button.config(state="disabled"))
                 self.window.destroy()
                 self.window = None
         else:
@@ -508,7 +534,7 @@ class NeteaseMusicDownloader:
         quality_row.pack(fill="x", pady=2)
         
         Label(quality_row, text="音质:", width=12, anchor="e").pack(side="left", padx=(0, 5))
-        self.quality_var = tk.StringVar(value="无损")
+        self.quality_var = StringVar(value="无损")
         self.quality_combo = Combobox(quality_row, textvariable=self.quality_var, width=15, 
                                      values=["标准", "极高", "无损", "Hi-Res", "高清环绕"], state="readonly")
         self.quality_combo.pack(side="left", padx=2)
@@ -576,7 +602,7 @@ class NeteaseMusicDownloader:
         self.status_label = Label(status_frame, text="就绪", foreground="#666")
         self.status_label.pack(side="left")
         
-        self.progress_var = tk.DoubleVar(value=0)
+        self.progress_var = DoubleVar(value=0)
         self.progressbar = Progressbar(status_frame, variable=self.progress_var, maximum=100, 
                                       style="success.Horizontal.Tprogressbar")
         self.progressbar.pack(side="right", fill="x", expand=True, padx=10)
@@ -585,7 +611,7 @@ class NeteaseMusicDownloader:
     def on_url_focus_in(self, event):
         """URL输入框获得焦点"""
         if self.url_entry.get() == "请输入歌曲链接":
-            self.url_entry.delete(0, tk.END)
+            self.url_entry.delete(0, END)
             self.url_entry.config(foreground="#000")
     
     def on_url_focus_out(self, event):
@@ -597,7 +623,7 @@ class NeteaseMusicDownloader:
     def on_playlist_focus_in(self, event):
         """歌单输入框获得焦点"""
         if self.playlist_entry.get() == "请输入歌单链接":
-            self.playlist_entry.delete(0, tk.END)
+            self.playlist_entry.delete(0, END)
             self.playlist_entry.config(foreground="#000")
     
     def on_playlist_focus_out(self, event):
@@ -609,7 +635,7 @@ class NeteaseMusicDownloader:
     def on_album_focus_in(self, event):
         """专辑输入框获得焦点"""
         if self.album_entry.get() == "请输入专辑链接":
-            self.album_entry.delete(0, tk.END)
+            self.album_entry.delete(0, END)
             self.album_entry.config(foreground="#000")
     
     def on_album_focus_out(self, event):
@@ -635,10 +661,10 @@ class NeteaseMusicDownloader:
         
         try:
             # 构建搜索URL
-            search_url = f"{self.search_api_url}?keywords={requests.utils.quote(keywords)}&offset={(self.current_page - 1) * self.page_size}&limit={self.page_size}"
+            search_url = f"{self.search_api_url}?keywords={utils.quote(keywords)}&offset={(self.current_page - 1) * self.page_size}&limit={self.page_size}"
             
             # 使用实例变量headers
-            response = requests.get(search_url, headers=self.headers, timeout=15)
+            response = get(search_url, headers=self.headers, timeout=15)
             response.raise_for_status()
             
             data = response.json()
@@ -646,7 +672,7 @@ class NeteaseMusicDownloader:
             if data.get('code') != 200 or not data.get('result', {}).get('songs'):
                 self.root_after(lambda: self.status_label.config(text="未找到相关歌曲"))
                 self.root_after(lambda: self.search_result_label.config(text="共找到 0 首歌曲"))
-                self.root_after(lambda: self.search_listbox.delete(0, tk.END))
+                self.root_after(lambda: self.search_listbox.delete(0, END))
                 self.root_after(lambda: self.prev_page_btn.config(state="disabled"))
                 self.root_after(lambda: self.next_page_btn.config(state="disabled"))
                 return
@@ -689,12 +715,12 @@ class NeteaseMusicDownloader:
     
     def update_search_results_ui(self):
         """更新搜索结果UI"""
-        self.search_listbox.delete(0, tk.END)
+        self.search_listbox.delete(0, END)
         
         for song in self.search_results:
             duration = self.format_duration(int(song.duration))
             display_text = f"{song.name} - {song.artists} ({song.album}) [{duration}]"
-            self.search_listbox.insert(tk.END, display_text)
+            self.search_listbox.insert(END, display_text)
         
         self.search_result_label.config(text=f"共找到 {len(self.search_results)} 首歌曲")
         self.page_info_label.config(text=f"{self.current_page}/{self.total_pages}")
@@ -812,7 +838,7 @@ class NeteaseMusicDownloader:
         
         # 使用实例变量headers
         data = json.dumps({"id": song_id})
-        response = requests.post(url, headers=self.headers, data=data, timeout=15)
+        response = post(url, headers=self.headers, data=data, timeout=15)
         response.raise_for_status()
         
         result = response.json()
@@ -827,7 +853,7 @@ class NeteaseMusicDownloader:
         
         # 使用实例变量headers
         data = json.dumps({"id": song_id, "level": quality_level})
-        response = requests.post(url, headers=self.headers, data=data, timeout=15)
+        response = post(url, headers=self.headers, data=data, timeout=15)
         response.raise_for_status()
         
         result = response.json()
@@ -839,11 +865,12 @@ class NeteaseMusicDownloader:
     def get_quality_level(self, quality_name):
         """获取音质级别"""
         quality_map = {
-            "标准": "standard",
-            "极高": "exhigh", 
-            "无损": "lossless",
-            "Hi-Res": "hires",
-            "高清环绕": "jyeffect"
+            "标准(2~5MB)": "standard",
+            "极高(5~10MB)": "exhigh", 
+            "无损(10~30MB)": "lossless",
+            "Hi-Res(>30MB)": "hires",
+            "沉浸环绕声(>50MB)": "sky",
+            "杜比全景声(>50MB)": "dolby"
         }
         return quality_map.get(quality_name, "lossless")
     
@@ -860,14 +887,14 @@ class NeteaseMusicDownloader:
         if any(s.id == song.id for s in self.current_songs):
             return  # 已存在
         self.current_songs.append(song)
-        self.download_listbox.insert(tk.END, song.get_display_name())
+        self.download_listbox.insert(END, song.get_display_name())
         self.download_btn.config(state="normal")
     
     def update_info_text(self, text):
         """更新信息文本"""
         self.info_text.config(state="normal")
-        self.info_text.delete(1.0, tk.END)
-        self.info_text.insert(tk.END, text)
+        self.info_text.delete(1.0, END)
+        self.info_text.insert(END, text)
         self.info_text.config(state="disabled")
     
     def add_selected_to_download(self):
@@ -931,9 +958,9 @@ class NeteaseMusicDownloader:
     
     def update_download_list_ui(self):
         """更新下载列表UI"""
-        self.download_listbox.delete(0, tk.END)
+        self.download_listbox.delete(0, END)
         for song in self.current_songs:
-            self.download_listbox.insert(tk.END, song.get_display_name())
+            self.download_listbox.insert(END, song.get_display_name())
         
         if self.current_songs:
             self.download_btn.config(state="normal")
@@ -941,7 +968,7 @@ class NeteaseMusicDownloader:
     def clear_download_list(self):
         """清空下载列表"""
         self.current_songs = []
-        self.download_listbox.delete(0, tk.END)
+        self.download_listbox.delete(0, END)
         self.download_btn.config(state="disabled")
         self.update_info_text("歌曲列表已清空")
         self.status_label.config(text="已清空下载列表")
@@ -997,14 +1024,14 @@ class NeteaseMusicDownloader:
                 file_path = os.path.join(self.temp_download_dir, filename)
                 
                 # 下载文件 - 使用实例变量headers
-                response = requests.get(song.url, headers=self.headers, stream=True, timeout=60)
+                response = get(song.url, headers=self.headers, stream=True, timeout=60)
                 response.raise_for_status()
                 
                 total_size = int(response.headers.get('content-length', 0))
                 downloaded_size = 0
                 
                 with open(file_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
+                    for chunk in response.iter_content(chunk_size=16384):
                         if chunk:
                             f.write(chunk)
                             downloaded_size += len(chunk)
@@ -1247,7 +1274,7 @@ class AdbFileUploader:
     def create_widgets(self):
         """创建主界面控件"""
         main_frame = Frame(self.root, padding=20)
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        main_frame.pack(fill=BOTH, expand=True)
         
         # 上传文件列表
         Label(main_frame, text="上传文件列表", font=("Helvetica", 12, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 5))
@@ -1256,23 +1283,23 @@ class AdbFileUploader:
         file_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 10))
         
         # 使用标准tkinter Listbox
-        self.file_listbox = Listbox(file_frame, height=6, width=60, selectmode=tk.EXTENDED)
-        self.file_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.file_listbox = Listbox(file_frame, height=6, width=60, selectmode=EXTENDED)
+        self.file_listbox.pack(side=LEFT, fill=BOTH, expand=True)
         
-        scrollbar = Scrollbar(file_frame, orient=tk.VERTICAL, command=self.file_listbox.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        scrollbar = Scrollbar(file_frame, orient=VERTICAL, command=self.file_listbox.yview)
+        scrollbar.pack(side=RIGHT, fill=Y)
         self.file_listbox.config(yscrollcommand=scrollbar.set)
         
         # 文件操作按钮
         btn_frame = Frame(main_frame)
         btn_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 15))
         
-        Button(btn_frame, text="添加文件", command=self.add_files, style="primary.TButton", width=10).pack(side=tk.LEFT, padx=2)
-        Button(btn_frame, text="添加目录", command=self.add_directory, style="success.TButton", width=10).pack(side=tk.LEFT, padx=2)
-        Button(btn_frame, text="删除", command=self.remove_selected_files, style="danger.TButton", width=10).pack(side=tk.LEFT, padx=2)
+        Button(btn_frame, text="添加文件", command=self.add_files, style="primary.TButton", width=10).pack(side=LEFT, padx=2)
+        Button(btn_frame, text="添加目录", command=self.add_directory, style="success.TButton", width=10).pack(side=LEFT, padx=2)
+        Button(btn_frame, text="删除", command=self.remove_selected_files, style="danger.TButton", width=10).pack(side=LEFT, padx=2)
         
         self.file_count_label = Label(btn_frame, text="已选择 0 项", font=("Helvetica", 9))
-        self.file_count_label.pack(side=tk.RIGHT)
+        self.file_count_label.pack(side=RIGHT)
         
         # 设备列表
         Label(main_frame, text="连接设备", font=("Helvetica", 12, "bold")).grid(row=3, column=0, sticky="w", pady=(10, 5))
@@ -1281,11 +1308,11 @@ class AdbFileUploader:
         device_frame.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(0, 15))
         
         # 使用标准tkinter Listbox
-        self.device_listbox = Listbox(device_frame, height=4, width=60, selectmode=tk.SINGLE)
-        self.device_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.device_listbox = Listbox(device_frame, height=4, width=60, selectmode=SINGLE)
+        self.device_listbox.pack(side=LEFT, fill=BOTH, expand=True)
         
-        device_scrollbar = Scrollbar(device_frame, orient=tk.VERTICAL, command=self.device_listbox.yview)
-        device_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        device_scrollbar = Scrollbar(device_frame, orient=VERTICAL, command=self.device_listbox.yview)
+        device_scrollbar.pack(side=RIGHT, fill=Y)
         self.device_listbox.config(yscrollcommand=device_scrollbar.set)
         
         Button(main_frame, text="刷新设备", command=self.check_connected_devices, style="info.TButton", width=10).grid(row=4, column=2, padx=10)
@@ -1298,7 +1325,7 @@ class AdbFileUploader:
         self.target_path_combo.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(0, 15))
         
         # 进度条和状态
-        self.progress_var = tk.DoubleVar(value=0)
+        self.progress_var = DoubleVar(value=0)
         self.progressbar = Progressbar(main_frame, variable=self.progress_var, maximum=100, style="success.Horizontal.Tprogressbar")
         self.progressbar.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(10, 5))
         
@@ -1319,7 +1346,7 @@ class AdbFileUploader:
 3. 使用数据线连接电脑，打开本程序，平板应该会提示：是否使用本台计算机调试，勾选一律使用，点确定即可。
 4. 重启软件，开始搞机吧 ~"""
         
-        self.tips_text = Label(main_frame, width=70, text=default_tips, wraplength=450, justify=tk.LEFT)
+        self.tips_text = Label(main_frame, width=70, text=default_tips, wraplength=450, justify=LEFT)
         self.tips_text.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(0, 10))
     
     def add_files(self):
@@ -1360,9 +1387,9 @@ class AdbFileUploader:
     
     def update_file_list(self):
         """更新文件列表"""
-        self.file_listbox.delete(0, tk.END)
+        self.file_listbox.delete(0, END)
         for file in self.upload_files:
-            self.file_listbox.insert(tk.END, file)
+            self.file_listbox.insert(END, file)
         
         self.file_count_label.config(text=f"已选择 {len(self.upload_files)} 项")
         self.update_upload_button_state()
@@ -1371,20 +1398,20 @@ class AdbFileUploader:
         """更新上传按钮状态"""
         has_devices = self.device_listbox.size() > 0
         has_files = len(self.upload_files) > 0
-        self.upload_button.config(state=tk.NORMAL if (has_devices and has_files) else tk.DISABLED)
+        self.upload_button.config(state=NORMAL if (has_devices and has_files) else DISABLED)
     
     def check_connected_devices(self):
         """检查连接的设备"""
         if not self.adb_path:
             self.status_label.config(text="未找到ADB，请将adb.exe放在程序目录下")
-            self.upload_button.config(state=tk.DISABLED)
+            self.upload_button.config(state=DISABLED)
             return
         
         try:
-            result = subprocess.run([self.adb_path, "devices"], capture_output=True, text=True, timeout=10)
+            result = subprocess.run([self.adb_path, "devices"], capture_output=True, text=True, timeout=17)
             output = result.stdout
             
-            self.device_listbox.delete(0, tk.END)
+            self.device_listbox.delete(0, END)
             devices = []
             
             lines = output.strip().split('\n')
@@ -1393,7 +1420,7 @@ class AdbFileUploader:
                     device_id = line.split('\t')[0].strip()
                     if device_id:
                         devices.append(device_id)
-                        self.device_listbox.insert(tk.END, device_id)
+                        self.device_listbox.insert(END, device_id)
             
             if devices:
                 self.device_listbox.selection_set(0)
@@ -1425,7 +1452,7 @@ class AdbFileUploader:
             target_path += "/"
         
         # 禁用UI
-        self.upload_button.config(state=tk.DISABLED)
+        self.upload_button.config(state=DISABLED)
         self.progress_var.set(0)
         self.status_label.config(text="准备上传...")
         
@@ -1462,7 +1489,7 @@ class AdbFileUploader:
                         full_target_path = f"{target_path}{filename}"
                         cmd = [self.adb_path, "push", source_path, full_target_path]
                     
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
                     
                     if result.returncode != 0:
                         error_msg = result.stderr.strip() or result.stdout.strip()
@@ -1479,12 +1506,12 @@ class AdbFileUploader:
             self.root.after(0, lambda: self.progress_var.set(100))
             self.root.after(0, lambda: self.status_label.config(text=f"上传完成: 共 {total_files} 个文件/目录"))
             self.root.after(0, lambda: messagebox.showinfo("成功", f"已成功上传 {total_files} 个文件/目录到\n{target_path}"))
-            self.root.after(0, lambda: self.upload_button.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.upload_button.config(state=NORMAL))
             
         except Exception as e:
             self.root.after(0, lambda: self.status_label.config(text=f"上传出错: {str(e)}"))
             self.root.after(0, lambda: messagebox.showerror("错误", f"上传出错: {str(e)}"))
-            self.root.after(0, lambda: self.upload_button.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.upload_button.config(state=NORMAL))
     
     def open_netease_downloader(self):
         """打开网易云音乐下载器"""
